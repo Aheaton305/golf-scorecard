@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Golf Scorecard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase global variables
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // --- Firebase Initialization ---
+        let app, auth, db, userId;
+
+        function initializeFirebase() {
+            try {
+                if (!app) {
+                    app = initializeApp(firebaseConfig);
+                    auth = getAuth(app);
+                    db = getFirestore(app);
+                    setLogLevel('Debug');
+                    console.log("Firebase initialized.");
+                }
+            } catch (e) {
+                showMessage("Failed to initialize Firebase. Please check your configuration.", true);
+                console.error("Firebase initialization error:", e);
+                return;
+            }
+
+            // Sign in the user
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    document.getElementById('user-id').textContent = userId;
+                    showMessage("Signed in successfully. You can now save and load your scorecard.");
+                } else {
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                            console.log("Signed in with custom token.");
+                        } else {
+                            await signInAnonymously(auth);
+                            console.log("Signed in anonymously.");
+                        }
+                    } catch (error) {
+                        showMessage("Authentication failed. Scores will not be saved.", true);
+                        console.error("Authentication error:", error);
+                    }
+                }
+            });
+        }
+        
+        // --- UI Message Helper ---
+        function showMessage(message, isError = false) {
+            const messageBox = document.getElementById('message-box');
+            messageBox.textContent = message;
+            if (isError) {
+                messageBox.classList.remove('text-green-400');
+                messageBox.classList.add('text-red-400');
+            } else {
+                messageBox.classList.remove('text-red-400');
+                messageBox.classList.add('text-green-400');
+            }
+        }
+        
+        // --- Firestore Functions ---
+        async function saveScorecard() {
+            if (!userId) {
+                showMessage("Authentication is not ready. Please try again in a moment.", true);
+                return;
+            }
+            showMessage("Saving scorecard...");
+            
+            const numPlayers = parseInt(document.getElementById('numPlayers').value);
+            const numHoles = parseInt(document.getElementById('numHoles').value);
+            
+            const pars = Array.from(document.querySelectorAll('.par-input')).map(input => parseInt(input.value) || 0);
+            const strokeIndexes = Array.from(document.querySelectorAll('.si-input')).map(input => {
+                const value = parseInt(input.value);
+                return isNaN(value) ? '' : value;
+            });
+            const yards = Array.from(document.querySelectorAll('.yards-input')).map(input => {
+                const value = parseInt(input.value);
+                return isNaN(value) ? '' : value;
+            });
+
+            const players = [];
+            for (let i = 0; i < numPlayers; i++) {
+                const playerRow = document.querySelector(`.player-row:nth-child(${i + 1})`);
+                const nameInput = playerRow.querySelector('th input[type="text"]');
+                const handicapInput = playerRow.querySelector('.handicap-input');
+                const scores = Array.from(playerRow.querySelectorAll('.score-input')).map(input => {
+                    const value = parseInt(input.value);
+                    return isNaN(value) ? '' : value;
+                });
+                
+                players.push({
+                    name: nameInput.value || `Player ${i + 1}`,
+                    handicap: parseInt(handicapInput.value) || 0,
+                    scores: scores
+                });
+            }
+
+            const scorecardData = {
+                players,
+                pars,
+                strokeIndexes,
+                yards,
+                numPlayers,
+                numHoles,
+                timestamp: new Date().toISOString()
+            };
+
+            const docRef = doc(db, `artifacts/${appId}/users/${userId}/scorecards/current_scorecard`);
+
+            try {
+                await setDoc(docRef, scorecardData);
+                showMessage("Scorecard saved successfully!");
+                console.log("Scorecard saved:", scorecardData);
+            } catch (e) {
+                showMessage("Error saving scorecard.", true);
+                console.error("Error saving document: ", e);
+            }
+        }
+
+        async function loadScorecard() {
+            if (!userId) {
+                showMessage("Authentication is not ready. Please try again in a moment.", true);
+                return;
+            }
+            showMessage("Loading scorecard...");
+            
+            const docRef = doc(db, `artifacts/${appId}/users/${userId}/scorecards/current_scorecard`);
+
+            try {
+                const docSnap = await getDoc(docRef);
+
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    document.getElementById('numPlayers').value = data.numPlayers;
+                    document.getElementById('numHoles').value = data.numHoles;
+                    
+                    generateScorecard(data);
+                    showMessage("Scorecard loaded successfully!");
+                    console.log("Scorecard loaded:", data);
+                } else {
+                    showMessage("No saved scorecard found.", true);
+                    console.log("No such document!");
+                }
+            } catch (e) {
+                showMessage("Error loading scorecard.", true);
+                console.error("Error getting document: ", e);
+            }
+        }
+
+        // --- Scorecard Logic ---
+        function generateScorecard(data = null) {
+            const numPlayers = parseInt(document.getElementById('numPlayers').value);
+            const numHoles = parseInt(document.getElementById('numHoles').value);
+
+            if (isNaN(numPlayers) || numPlayers < 1 || numPlayers > 20) {
+                document.getElementById('numPlayers').value = 1;
+                return;
+            }
+            if (isNaN(numHoles) || numHoles < 1 || numHoles > 18) {
+                document.getElementById('numHoles').value = 18;
+                return;
+            }
+
+            let tableHTML = `
+                <table class="bg-gray-800 rounded-lg overflow-hidden">
+                    <thead>
+                        <tr>
+                            <th class="bg-gray-700 text-left">Player</th>
+                            <th class="bg-gray-700">Handicap</th>
+                            ${Array.from({ length: numHoles }, (_, i) => `<th class="bg-gray-700">Hole ${i + 1}</th>`).join('')}
+                            <th class="bg-gray-700 font-bold">Front 9</th>
+                            <th class="bg-gray-700 font-bold">Back 9</th>
+                            <th class="bg-gray-700 font-bold">Gross Total</th>
+                            <th class="bg-gray-700 font-bold">Net Total</th>
+                        </tr>
+                        <tr class="bg-gray-700">
+                            <th class="text-left">Par</th>
+                            <th></th>
+                            ${Array.from({ length: numHoles }, (_, j) => {
+                                const parValue = data && data.pars ? data.pars[j] : '';
+                                return `<td><input type="number" value="${parValue}" min="1" class="w-16 par-input text-center bg-gray-700 rounded-md p-1" data-hole="${j}"></td>`;
+                            }).join('')}
+                            <th class="font-bold"></th>
+                            <th class="font-bold"></th>
+                            <th class="font-bold"></th>
+                            <th class="font-bold"></th>
+                        </tr>
+                        <tr class="bg-gray-700">
+                            <th class="text-left">SI</th>
+                            <th></th>
+                            ${Array.from({ length: numHoles }, (_, j) => {
+                                const siValue = data && data.strokeIndexes ? data.strokeIndexes[j] : '';
+                                return `<td><input type="number" value="${siValue}" min="1" max="${numHoles}" class="w-16 si-input text-center bg-gray-700 rounded-md p-1" data-hole="${j}"></td>`;
+                            }).join('')}
+                            <th class="font-bold"></th>
+                            <th class="font-bold"></th>
+                            <th class="font-bold"></th>
+                            <th class="font-bold"></th>
+                        </tr>
+                        <tr class="bg-gray-700">
+                            <th class="text-left">Yards</th>
+                            <th></th>
+                            ${Array.from({ length: numHoles }, (_, j) => {
+                                const yardsValue = data && data.yards ? data.yards[j] : '';
+                                return `<td><input type="number" value="${yardsValue}" min="1" class="w-16 yards-input text-center bg-gray-700 rounded-md p-1" data-hole="${j}"></td>`;
+                            }).join('')}
+                            <th class="font-bold"></th>
+                            <th class="font-bold"></th>
+                            <th class="font-bold"></th>
+                            <th class="font-bold"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            for (let i = 0; i < numPlayers; i++) {
+                const playerData = data && data.players[i] ? data.players[i] : null;
+                const playerName = playerData ? playerData.name : `Player ${i + 1}`;
+                const playerHandicap = playerData ? playerData.handicap : 0;
+
+                tableHTML += `
+                    <tr class="player-row hover:bg-gray-700 transition duration-150">
+                        <th class="bg-gray-700 text-left">
+                            <input type="text" placeholder="Player ${i + 1}" class="w-full bg-gray-800 rounded-md p-1" value="${playerName}">
+                        </th>
+                        <td>
+                            <input type="number" value="${playerHandicap}" min="0" class="w-16 handicap-input text-center bg-gray-700 rounded-md p-1" data-player="${i}">
+                        </td>
+                        ${Array.from({ length: numHoles }, (_, j) => {
+                            const scoreValue = playerData && playerData.scores ? playerData.scores[j] : '';
+                            return `
+                                <td>
+                                    <div class="flex items-center justify-center space-x-1">
+                                        <input type="number" min="1" class="w-16 score-input text-center bg-gray-700 rounded-md p-1" data-player="${i}" data-hole="${j}" value="${scoreValue}">
+                                        <span class="score-vs-par text-xs font-semibold" data-player="${i}" data-hole="${j}"></span>
+                                    </div>
+                                </td>
+                            `;
+                        }).join('')}
+                        <td class="front-9-gross font-bold text-lg">0</td>
+                        <td class="back-9-gross font-bold text-lg">0</td>
+                        <td class="gross-score font-bold text-lg">0</td>
+                        <td class="net-score font-bold text-lg">0</td>
+                    </tr>
+                `;
+            }
+
+            tableHTML += `
+                    </tbody>
+                </table>
+            `;
+
+            document.getElementById('scorecard-container').innerHTML = tableHTML;
+            
+            const inputs = document.querySelectorAll('.score-input, .handicap-input, .par-input, .si-input, .yards-input');
+            inputs.forEach(input => {
+                input.addEventListener('input', updateScores);
+            });
+            updateScores();
+        }
+
+        function updateScores() {
+            const numPlayers = parseInt(document.getElementById('numPlayers').value);
+            const numHoles = parseInt(document.getElementById('numHoles').value);
+            
+            const pars = Array.from(document.querySelectorAll('.par-input')).map(input => parseInt(input.value) || 0);
+            const playersData = [];
+
+            for (let i = 0; i < numPlayers; i++) {
+                let grossTotal = 0;
+                let front9Gross = 0;
+                let back9Gross = 0;
+                let holesCompleted = 0;
+                
+                const playerRow = document.querySelector(`.player-row:nth-child(${i + 1})`);
+                const nameInput = playerRow.querySelector('th input[type="text"]');
+                const handicapInput = playerRow.querySelector('.handicap-input');
+                const handicap = parseInt(handicapInput.value) || 0;
+
+                for (let j = 0; j < numHoles; j++) {
+                    const input = document.querySelector(`[data-player="${i}"][data-hole="${j}"]`);
+                    const score = parseInt(input.value);
+                    const par = pars[j] || 0;
+                    
+                    const scoreVsParSpan = document.querySelector(`.score-vs-par[data-player="${i}"][data-hole="${j}"]`);
+                    scoreVsParSpan.textContent = '';
+                    scoreVsParSpan.classList.remove('text-green-400', 'text-red-400', 'text-yellow-400');
+                    
+                    if (!isNaN(score)) {
+                        grossTotal += score;
+                        holesCompleted++; // Increment if a score exists
+                        
+                        if (j < 9) {
+                            front9Gross += score;
+                        } else {
+                            back9Gross += score;
+                        }
+
+                        const difference = score - par;
+                        if (difference < 0) {
+                            scoreVsParSpan.textContent = `${difference}`;
+                            scoreVsParSpan.classList.add('text-green-400');
+                        } else if (difference > 0) {
+                            scoreVsParSpan.textContent = `+${difference}`;
+                            scoreVsParSpan.classList.add('text-red-400');
+                        } else if (difference === 0 && par !== 0) {
+                            scoreVsParSpan.textContent = 'E';
+                            scoreVsParSpan.classList.add('text-yellow-400');
+                        }
+                    }
+                }
+                
+                const netTotal = grossTotal - handicap;
+
+                const front9GrossCell = playerRow.querySelector('.front-9-gross');
+                const back9GrossCell = playerRow.querySelector('.back-9-gross');
+                const grossScoreCell = playerRow.querySelector('.gross-score');
+                const netScoreCell = playerRow.querySelector('.net-score');
+
+                front9GrossCell.textContent = front9Gross;
+                back9GrossCell.textContent = back9Gross;
+                grossScoreCell.textContent = grossTotal;
+                netScoreCell.textContent = netTotal;
+
+                playersData.push({
+                    name: nameInput.value || `Player ${i + 1}`,
+                    gross: grossTotal,
+                    net: netTotal,
+                    handicap: handicap,
+                    holesCompleted: holesCompleted // Add new property to player data
+                });
+            }
+
+            renderLeaderboard(playersData);
+        }
+
+        function renderLeaderboard(players) {
+            players.sort((a, b) => a.net - b.net);
+
+            let leaderboardHTML = `
+                <h2 class="text-3xl font-bold text-center mb-4">Leaderboard</h2>
+                <table class="bg-gray-800 rounded-lg overflow-hidden w-full">
+                    <thead>
+                        <tr class="bg-gray-700">
+                            <th class="text-left py-3 px-4">Rank</th>
+                            <th class="text-left py-3 px-4">Player</th>
+                            <th class="py-3 px-4">Gross</th>
+                            <th class="py-3 px-4">Net</th>
+                            <th class="py-3 px-4">Holes Completed</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+            
+            let rank = 1;
+            for (let i = 0; i < players.length; i++) {
+                if (i > 0 && players[i].net > players[i-1].net) {
+                    rank = i + 1;
+                }
+                leaderboardHTML += `
+                    <tr class="border-b border-gray-600 last:border-b-0">
+                        <td class="text-left py-3 px-4 text-xl font-bold text-teal-400">${rank}</td>
+                        <td class="text-left py-3 px-4">${players[i].name}</td>
+                        <td class="py-3 px-4">${players[i].gross}</td>
+                        <td class="py-3 px-4">${players[i].net}</td>
+                        <td class="py-3 px-4">${players[i].holesCompleted}</td>
+                    </tr>
+                `;
+            }
+
+            leaderboardHTML += `
+                    </tbody>
+                </table>
+            `;
+            document.getElementById('leaderboard-container').innerHTML = leaderboardHTML;
+        }
+        
+        // --- View Toggling ---
+        function showView(viewId) {
+            document.getElementById('scorecard-view').classList.add('hidden');
+            document.getElementById('leaderboard-view').classList.add('hidden');
+            document.getElementById(viewId).classList.remove('hidden');
+        }
+        
+        // --- Event Listeners ---
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeFirebase();
+            document.getElementById('newGameBtn').addEventListener('click', () => {
+                generateScorecard();
+                showView('scorecard-view');
+            });
+            document.getElementById('saveBtn').addEventListener('click', saveScorecard);
+            document.getElementById('loadBtn').addEventListener('click', loadScorecard);
+            document.getElementById('scorecardTabBtn').addEventListener('click', () => showView('scorecard-view'));
+            document.getElementById('leaderboardTabBtn').addEventListener('click', () => {
+                showView('leaderboard-view');
+                // Re-render leaderboard on view switch to ensure it's up-to-date
+                updateScores();
+            });
+
+            generateScorecard(); // Initial generation
+            showView('scorecard-view'); // Default view
+        });
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1a202c;
+            color: #e2e8f0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 1rem;
+        }
+        .container {
+            max-width: 900px;
+            width: 100%;
+            background-color: #2d3748;
+            border-radius: 1.5rem;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            padding: 2rem;
+        }
+        input[type="text"], input[type="number"] {
+            background-color: #4a5568;
+            color: #e2e8f0;
+            border: none;
+            border-radius: 0.5rem;
+            padding: 0.5rem;
+            outline: none;
+            transition: border-color 0.2s ease-in-out;
+        }
+        input[type="text"]:focus, input[type="number"]:focus {
+            border-color: #38b2ac;
+            box-shadow: 0 0 0 2px #38b2ac;
+        }
+        input[type="number"]::-webkit-outer-spin-button,
+        input[type="number"]::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        input[type="number"] {
+            -moz-appearance: textfield;
+        }
+        .table-container {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        table {
+            min-width: 800px;
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            text-align: center;
+            padding: 0.75rem 0.5rem;
+            border: 1px solid #4a5568;
+        }
+        th {
+            background-color: #4a5568;
+            position: sticky;
+            left: 0;
+            z-index: 10;
+        }
+        .player-row th {
+            width: 150px;
+        }
+        .tab-button {
+            padding: 0.5rem 1rem;
+            border-radius: 0.75rem;
+            transition: background-color 0.2s ease-in-out, transform 0.2s ease-in-out;
+            transform: scale(1.0);
+        }
+        .tab-button.active {
+            background-color: #38b2ac;
+            transform: scale(1.05);
+        }
+        .tab-button:not(.active):hover {
+            background-color: #4a5568;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100">
+
+<div class="container">
+    <h1 class="text-4xl font-bold text-center mb-6">Golf Scorecard</h1>
+    <p class="text-center text-sm mb-4">User ID: <span id="user-id" class="font-mono">Loading...</span></p>
+
+    <div class="flex justify-center flex-wrap gap-4 mb-6">
+        <button id="scorecardTabBtn" class="bg-teal-600 text-white font-bold tab-button active">Scorecard</button>
+        <button id="leaderboardTabBtn" class="bg-gray-600 text-white font-bold tab-button">Leaderboard</button>
+    </div>
+
+    <div id="scorecard-view">
+        <div class="flex flex-col md:flex-row md:space-x-4 mb-4">
+            <div class="flex-1 mb-4 md:mb-0">
+                <label for="numPlayers" class="block text-sm font-medium text-gray-400">Number of Players (1-20)</label>
+                <input type="number" id="numPlayers" min="1" max="20" value="1" class="mt-1 block w-full rounded-md shadow-sm bg-gray-700 text-gray-100 border-gray-600 focus:ring-teal-500 focus:border-teal-500 sm:text-sm p-2">
+            </div>
+            <div class="flex-1">
+                <label for="numHoles" class="block text-sm font-medium text-gray-400">Number of Holes (1-18)</label>
+                <input type="number" id="numHoles" min="1" max="18" value="18" class="mt-1 block w-full rounded-md shadow-sm bg-gray-700 text-gray-100 border-gray-600 focus:ring-teal-500 focus:border-teal-500 sm:text-sm p-2">
+            </div>
+        </div>
+        <div class="flex justify-center flex-wrap gap-4 mb-6">
+            <button id="newGameBtn" class="bg-teal-600 hover:bg-teal-700 text-white font-bold py-2 px-6 rounded-lg transition duration-300 transform hover:scale-105">
+                New Game
+            </button>
+            <button id="saveBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg transition duration-300 transform hover:scale-105">
+                Save Scorecard
+            </button>
+            <button id="loadBtn" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-lg transition duration-300 transform hover:scale-105">
+                Load Scorecard
+            </button>
+        </div>
+        <div id="message-box" class="text-center text-sm font-medium mb-4"></div>
+        <div id="scorecard-container" class="table-container rounded-lg shadow-lg">
+            <!-- Scorecard will be dynamically generated here -->
+        </div>
+    </div>
+
+    <div id="leaderboard-view" class="hidden">
+        <div id="leaderboard-container" class="table-container rounded-lg shadow-lg">
+            <!-- Leaderboard will be dynamically generated here -->
+        </div>
+    </div>
+</div>
+
+</body>
+</html>
